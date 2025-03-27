@@ -1,0 +1,333 @@
+---
+title: "NFL Fourth Down Project"
+author: "Brett Laderman"
+date: "2025-03-05"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Loading Libraries
+```{r}
+library(nflfastR)
+library(nflreadr)
+library(dplyr)
+library(caret)
+library(randomForest)
+library(glmnet)
+library(tidyr)
+library(ggplot2)
+library(car)
+library(xgboost)
+library(pROC)
+```
+
+
+Loading NFL Data
+```{r}
+# Load play-by-play data for the past few seasons
+pbp_data <- load_pbp(2021:2024)
+```
+
+
+Filter to 4th Down Plays
+```{r}
+fourth_down <- pbp_data %>% 
+  filter(down == 4, !is.na(play_type), play_type != 'no_play', play_type != 'qb_kneel', !is.na(yardline_100)) %>% 
+  select(play_id, season, game_id, posteam, defteam, qtr, quarter_seconds_remaining,
+    yardline_100, score_differential, play_type, desc, wp, epa, ydstogo, 
+    fourth_down_converted, fourth_down_failed, punt_attempt, field_goal_attempt) %>% 
+  mutate(go_for_it = ifelse(play_type == 'pass' | play_type == 'run', 1, 0),
+         fourth_down_decision = case_when(go_for_it == 1 ~ "Go for it",
+                                          punt_attempt == 1 ~ "Punt",
+                                          field_goal_attempt == 1 ~ "Field Goal"),
+         fourth_down_decision_binary = case_when(go_for_it == 1 ~ "Go for it",
+                                          punt_attempt == 1 ~ "Don't go for it",
+                                          field_goal_attempt == 1 ~ "Don't go for it"),
+         optimal_fourth_down_decision = case_when(epa >= 0 ~ "Go for it",
+                                                  punt_attempt == 1 ~ "Punt",
+                                                  field_goal_attempt == 1 ~ "Field Goal",
+                                                  epa < 0 & yardline_100 > 40 ~ "Punt",
+                                                  epa < 0 & yardline_100 <= 40 ~ "Field Goal"),
+         optimal_fourth_down_decision_binary = case_when(epa >= 0 ~ "Go for it",
+                                                  punt_attempt == 1 ~ "Don't go for it",
+                                                  field_goal_attempt == 1 ~ "Don't go for it",
+                                                  epa < 0 & yardline_100 > 40 ~ "Don't go for it",
+                                                  epa < 0 & yardline_100 <= 40 ~ "Don't go for it"))
+
+
+fourth_down_data <- fourth_down %>% 
+  select(yardline_100, quarter_seconds_remaining, score_differential, wp, fourth_down_decision)
+
+
+fourth_down_data$fourth_down_decision <- as.factor(fourth_down_data$fourth_down_decision)
+
+
+comparison <- fourth_down %>%
+  count(fourth_down_decision, optimal_fourth_down_decision) %>%
+  spread(optimal_fourth_down_decision, n, fill = 0)
+
+print(comparison)
+
+
+fourth_down_data_binary <- fourth_down %>% 
+  select(yardline_100, quarter_seconds_remaining, score_differential, wp, fourth_down_decision_binary)
+
+
+fourth_down_data_binary$fourth_down_decision_binary <- as.factor(fourth_down_data_binary$fourth_down_decision_binary)
+
+
+Fourth_Down_Dec_Binary_Table <- fourth_down %>% 
+  group_by(fourth_down_decision_binary) %>% 
+  summarise(Fourth_Down_Decision = n())
+
+Fourth_Down_Dec_Table <- fourth_down %>% 
+  group_by(fourth_down_decision) %>% 
+  summarise(Total = n())
+  
+```
+
+
+Fourth Down Decision Distribution
+```{r}
+ggplot(Fourth_Down_Dec_Table, aes(x = fourth_down_decision, y = Total)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Fourth Down Decision Distribution 2021 - 2024",
+    x = "Fourth Down Decision",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+```
+
+
+Trends Over Time
+```{r}
+fourth_down_trends <- fourth_down %>%
+  group_by(season) %>%
+  summarize(go_for_it_rate = mean(fourth_down_decision == "Go for it"),
+            go_for_it = sum(fourth_down_decision_binary == "Go for it"),
+            dont_go_for_it = sum(fourth_down_decision_binary == "Don't go for it"))
+
+ggplot(fourth_down_trends, aes(x = season, y = go_for_it_rate)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Fourth Down Aggressiveness 2021 - 2024",
+       x = "Season", y = "Go For It Rate") +
+  theme_minimal()
+```
+
+
+
+
+Team Aggressiveness
+```{r}
+team_aggressiveness <- fourth_down %>%
+  group_by(posteam) %>%
+  summarize(go_for_it_rate = mean(fourth_down_decision == "Go for it")) %>%
+  arrange(desc(go_for_it_rate))
+
+ggplot(team_aggressiveness, aes(x = reorder(posteam, go_for_it_rate), y = go_for_it_rate)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Fourth Down Aggressiveness by Team 2021 - 2024",
+       x = "Team", y = "Go For It Rate") +
+  theme_minimal()
+```
+
+
+Team Fourth Down Success Rate
+```{r}
+fourth_down_success <- fourth_down %>%
+  filter(fourth_down_decision == "Go for it") %>% 
+  group_by(posteam) %>%
+  summarize(Fourth_Down_Success_rate = mean(fourth_down_converted)) %>%
+  arrange(desc(Fourth_Down_Success_rate))
+
+test <- fourth_down %>%
+  filter(fourth_down_decision == "Go for it") %>% 
+  summarize(Fourth_Down_Success_rate = mean(fourth_down_converted)) %>%
+  arrange(desc(Fourth_Down_Success_rate))
+
+ggplot(fourth_down_success, aes(x = reorder(posteam, Fourth_Down_Success_rate), y = Fourth_Down_Success_rate)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Fourth Down Conversion Success Rate by Team 2021 - 2024",
+       x = "Team", y = "Fourth Down Conversion Success Rate") +
+  theme_minimal()
+```
+
+
+
+
+Split Training/Test
+```{r}
+## Creating training and testing data
+set.seed(123)
+
+
+# Ensure target variable is a factor and convert to numeric
+fourth_down_data_binary <- fourth_down_data_binary %>%
+  mutate(fourth_down_decision_binary = factor(fourth_down_decision_binary, 
+                                       levels = c("Go for it", "Don't go for it")))
+
+trainIndex <- createDataPartition(fourth_down_data_binary$fourth_down_decision_binary, p = 0.7, list = FALSE)
+train <- fourth_down_data_binary[trainIndex, ]
+test <- fourth_down_data_binary[-trainIndex, ]
+
+# Convert target variable to numeric
+train$fourth_down_decision_binary <- as.numeric(train$fourth_down_decision_binary) - 1
+test$fourth_down_decision_binary <- as.numeric(test$fourth_down_decision_binary) - 1
+
+# Convert to feature matrix
+train_x <- model.matrix(fourth_down_decision_binary ~ ., data = train)[, -1]
+train_y <- train$fourth_down_decision_binary
+
+test_x <- model.matrix(fourth_down_decision_binary ~ ., data = test)[, -1]
+test_y <- test$fourth_down_decision_binary
+
+# Convert to DMatrix format
+dtrain <- xgb.DMatrix(data = train_x, label = train_y)
+dtest <- xgb.DMatrix(data = test_x, label = test_y)
+```
+
+
+XGB Model
+```{r}
+# First round of cross-validation
+set.seed(123)
+xgbcv <- xgb.cv(
+  data = dtrain,
+  nrounds = 50,
+  nfold = 10,
+  objective = "binary:logistic", 
+  eval_metric = "logloss", 
+  subsample = 0.5
+)
+
+# Choose optimal rounds based on log loss
+best_nrounds <- which.min(xgbcv$evaluation_log$test_logloss_mean)
+
+# Tuning grid
+tune_grid <- expand.grid(
+  nrounds = best_nrounds,
+  eta = seq(0.05, 0.3, by = 0.05),
+  max_depth = 2:8,
+  gamma = c(0),
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = seq(0.5, 1, by = 0.1)
+)
+
+# Train model
+set.seed(123)
+xgb_model <- train(
+  x = train_x, y = train_y,
+  method = "xgbTree",
+  tuneGrid = tune_grid,
+  trControl = trainControl(method = 'cv', number = 10),
+  metric = "logLoss",
+  objective = "binary:logistic"  # Binary classification
+)
+
+# Plot results and best hyperparameters
+plot(xgb_model)
+xgb_model$bestTune
+
+
+# Extract best parameters
+best_params <- xgb_model$bestTune
+
+# Train final model
+final_model <- xgb.train(
+  params = list(
+    objective = "binary:logistic",
+    eval_metric = "logloss",
+    eta = best_params$eta,
+    max_depth = best_params$max_depth,
+    gamma = best_params$gamma,
+    colsample_bytree = best_params$colsample_bytree,
+    min_child_weight = best_params$min_child_weight,
+    subsample = best_params$subsample
+  ),
+  data = dtrain,
+  nrounds = best_params$nrounds,
+  watchlist = list(train = dtrain, eval = dtest),
+  early_stopping_rounds = 10
+)
+
+```
+
+
+
+
+```{r}
+# Make probability predictions
+pred_probs <- predict(final_model, dtest)
+
+# Convert to class labels using 0.5 threshold
+pred_labels <- ifelse(pred_probs >= 0.5, 1, 0)
+
+# Convert to factor with correct levels for comparison
+test$predicted_decision <- factor(pred_labels, levels = c(0, 1), 
+                                  labels = c("Go for it", "Don't go for it"))
+
+# Evaluate model performance
+confusionMatrix(
+  data = test$predicted_decision,
+  reference = factor(test$fourth_down_decision_binary, levels = c(0, 1),
+                     labels = c("Go for it", "Don't go for it"))
+)
+
+```
+
+
+
+```{r}
+library(ROCit)
+
+roc_obj <- rocit(class = test$fourth_down_decision_binary, score = pred_probs)
+
+plot(roc_obj)$optimal
+
+summary(roc_obj)
+
+```
+
+
+
+```{r}
+# Get feature importance
+importance <- xgb.importance(model = final_model)
+
+# Plot the variable importance
+xgb.plot.importance(importance)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
